@@ -1,0 +1,8 @@
+# Cherry dataset-gen folder is run on Ubuntu — shell scripts and their
+# siblings must keep LF line endings even when cloned on Windows, or the
+# shebang breaks with `bash\r: no such file or directory`.
+cherry_dataset_gen/**/*.sh     text eol=lf
+cherry_dataset_gen/**/*.py     text eol=lf
+
+# All shell scripts in the repo are Linux-targeted.
+*.sh                           text eol=lf

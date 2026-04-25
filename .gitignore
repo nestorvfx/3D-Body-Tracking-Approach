@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# Generated dataset output — images, labels, manifests.  Reproducible from
+# scripts; never commit these.
+# ---------------------------------------------------------------------------
+dataset/output/
+
+# ---------------------------------------------------------------------------
+# External datasets and third-party assets (user-downloaded; often multi-GB
+# and under licences that forbid redistribution).
+#   dataset/assets/            → CMU BVH, 100STYLE, AIST++, HDRIs, MPFB packs
+# ---------------------------------------------------------------------------
+dataset/assets/
+dataset/logs/
+
+# Same asset pool exposed under cherry_dataset_gen/ via a Windows junction /
+# Linux symlink (see cherry_dataset_gen/README).  Walking the link resolves
+# to ~41k BVH / HDRI / MPFB files — never commit these either.
+cherry_dataset_gen/assets/
+
+# ---------------------------------------------------------------------------
+# Training artefacts — checkpoints, TensorBoard event files, run configs.
+# ---------------------------------------------------------------------------
+training/runs/
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+*.bin
+
+# ---------------------------------------------------------------------------
+# Python caches and build artefacts
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# ---------------------------------------------------------------------------
+# Editor / IDE / AI tool state
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# ---------------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Blender
+# ---------------------------------------------------------------------------
+*.blend1
+*.blend2
+*.blend@
+
+# ---------------------------------------------------------------------------
+# Generic binary bulk — rebuildable, not source.
+# ---------------------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
