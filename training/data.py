@@ -13,6 +13,13 @@ in training/AUGMENTATION_AUDIT.md:
   7. ImageNet normalisation
   8. SimCC-3D target encoding
 
+Storage strategy: dataset records are kept as parallel numpy arrays rather
+than a Python list-of-dicts.  This is the documented workaround for the
+DataLoader memory leak under fork (pytorch/pytorch#13246): Python objects'
+refcount writes trigger copy-on-write page duplication in workers, but
+numpy arrays don't have per-element refcounts, so worker memory stays flat
+across epochs even with persistent_workers=True.
+
 Returns a dict of tensors (+ some meta) for each sample.
 """
 from __future__ import annotations
@@ -52,15 +59,38 @@ class DataConfig:
     training: bool = True
 
 
-def _load_manifest(dataset_dir: Path, split: str) -> list[dict]:
-    out = []
+def _load_manifest_arrays(dataset_dir: Path, split: str) -> dict | None:
+    """Load labels.jsonl into parallel numpy arrays (leak-free under fork).
+
+    pytorch/pytorch#13246 documents that DataLoader workers using
+    persistent_workers=True under fork accumulate memory because Python
+    refcount writes trigger COW page copies in each worker.  Storing the
+    dataset as numpy arrays (no per-element refcount) eliminates that leak
+    entirely while preserving __getitem__ behaviour.
+    """
+    rows: list[dict] = []
     with (dataset_dir / "labels.jsonl").open() as fh:
         for line in fh:
             rec = json.loads(line)
             if rec.get("split") != split:
                 continue
-            out.append(rec)
-    return out
+            rows.append(rec)
+    n = len(rows)
+    if n == 0:
+        return None
+
+    arrs: dict[str, np.ndarray] = {
+        "kps2d":     np.stack([np.asarray(r["keypoints_2d"],     dtype=np.float32) for r in rows]),
+        "kps3d":     np.stack([np.asarray(r["keypoints_3d_cam"], dtype=np.float32) for r in rows]),
+        "bbox":      np.stack([np.asarray(r["bbox_xywh"],         dtype=np.float32) for r in rows]),
+        "K":         np.stack([np.asarray(r["camera_K"],          dtype=np.float32) for r in rows]),
+        "image_wh":  np.stack([np.asarray(r["image_wh"],          dtype=np.int32)   for r in rows]),
+        # Bytes arrays for strings — fixed-width, no per-element refcount.
+        # Auto-sized to the longest string in the column.
+        "image_rel": np.array([r["image_rel"] for r in rows], dtype=np.bytes_),
+        "id":        np.array([r["id"]        for r in rows], dtype=np.bytes_),
+    }
+    return arrs
 
 
 def _topdown_affine(img: np.ndarray, bbox_xywh, out_wh: tuple[int, int]):
@@ -82,15 +112,21 @@ def _warp_points(pts: np.ndarray, M: np.ndarray) -> np.ndarray:
 
 
 class SynthPoseDataset(Dataset):
-    """Yields RGB + SimCC-3D targets for the JSONL dataset."""
+    """Yields RGB + SimCC-3D targets for the JSONL dataset.
+
+    Stores rows as parallel numpy arrays (see _load_manifest_arrays) to
+    avoid the well-known DataLoader-fork-COW memory leak that shows up
+    when the dataset is a Python list of dicts.
+    """
 
     def __init__(self, cfg: DataConfig):
         self.cfg = cfg
         self.root = Path(cfg.dataset_dir)
-        self.records = _load_manifest(self.root, cfg.split)
-        if not self.records:
+        self.arrs = _load_manifest_arrays(self.root, cfg.split)
+        if self.arrs is None:
             raise RuntimeError(
                 f"No samples found in {cfg.dataset_dir} split={cfg.split}")
+        self._n = int(len(self.arrs["id"]))
         self.simcc = SimCC3DConfig(
             input_size=(cfg.input_wh[0], cfg.input_wh[1], cfg.input_wh[1]))
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -98,7 +134,7 @@ class SynthPoseDataset(Dataset):
         self.photo = build_sim2real_aug() if (cfg.training and cfg.photometric) else None
 
     def __len__(self) -> int:
-        return len(self.records)
+        return self._n
 
     def _transform(self, img_full, kps_2d_full, kps_3d, bbox, rng, training: bool,
                    return_stages=False):
@@ -153,17 +189,20 @@ class SynthPoseDataset(Dataset):
         return crop, kps2d, kps_3d, vis01, use_bbox, stages
 
     def __getitem__(self, idx):
-        rec = self.records[idx]
         rng = random.Random(
             idx * 1_000_003 + (0 if self.cfg.training else 1))
 
-        img_path = self.root / rec["image_rel"]
+        # Indexing returns numpy views; .copy() defends against in-place
+        # mutation by _transform corrupting the shared array seen by other
+        # workers / future __getitem__ calls.
+        img_rel = self.arrs["image_rel"][idx].decode("utf-8")
+        img_path = self.root / img_rel
         img_bgr = cv2.imread(str(img_path))
         img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        kps_2d_full = np.array(rec["keypoints_2d"], dtype=np.float32)   # [17, 3] (u,v,vis)
-        kps_3d = np.array(rec["keypoints_3d_cam"], dtype=np.float32)    # [17, 3]
-        bbox = tuple(rec["bbox_xywh"])
+        kps_2d_full = self.arrs["kps2d"][idx].copy()   # [17, 3] (u,v,vis)
+        kps_3d      = self.arrs["kps3d"][idx].copy()    # [17, 3]
+        bbox        = tuple(self.arrs["bbox"][idx].tolist())
 
         crop, kps2d, kps3d, vis01, use_bbox, _ = self._transform(
             img, kps_2d_full, kps_3d, bbox, rng, self.cfg.training)
@@ -180,7 +219,7 @@ class SynthPoseDataset(Dataset):
         # camera 3D frame.  We keep the ORIGINAL K (full-image) and store
         # the cropped-frame bbox so eval can un-warp the crop pixel back
         # to original-image pixel before applying K^-1.
-        K = np.array(rec["camera_K"], dtype=np.float32)
+        K = self.arrs["K"][idx].copy()       # [3,3] float32
 
         # CLIFF-style conditioning features: bbox (normalised by full-image
         # size) + camera focals (normalised by full-image diagonal).  Giving
@@ -191,8 +230,8 @@ class SynthPoseDataset(Dataset):
         # The bbox used here is the POST-jitter bbox (the crop's actual
         # source region in the full image), not the raw label bbox — that's
         # what the model needs to geometrically reason about.
-        img_w_full = float(rec["image_wh"][0])
-        img_h_full = float(rec["image_wh"][1])
+        img_w_full = float(self.arrs["image_wh"][idx, 0])
+        img_h_full = float(self.arrs["image_wh"][idx, 1])
         diag = float((img_w_full ** 2 + img_h_full ** 2) ** 0.5)
         bx, by, bw, bh = use_bbox
         cond = np.array([
@@ -234,7 +273,8 @@ class SynthPoseDataset(Dataset):
             "kps3d": torch.from_numpy(kps3d.astype(np.float32)),
             "vis": torch.from_numpy(vis01),
             "camera_K": torch.from_numpy(K),                   # [3,3]
-            "image_wh_full": torch.tensor(rec["image_wh"], dtype=torch.float32),
+            "image_wh_full": torch.tensor(
+                self.arrs["image_wh"][idx], dtype=torch.float32),
             # NB: `kps2d` above is in CROP frame (after all augs).  For
             # val we bypass aug (photometric=False), but keypoints still
             # live in crop frame because of TopdownAffine.  We carry the
@@ -242,5 +282,5 @@ class SynthPoseDataset(Dataset):
             "bbox_pre_crop": torch.tensor(list(use_bbox), dtype=torch.float32),
             "cond": torch.from_numpy(cond),                    # [6]
             "k_prior": torch.tensor(k_prior, dtype=torch.float32),
-            "id": rec["id"],
+            "id": self.arrs["id"][idx].decode("utf-8"),
         }
