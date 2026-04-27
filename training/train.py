@@ -97,6 +97,29 @@ def parse_args():
                          "the previous schedule has annealed to ~0 LR.")
     p.add_argument("--input-w", type=int, default=192)
     p.add_argument("--input-h", type=int, default=256)
+    # ---- Sim-to-real augmentation paths (F1 + F2) -------------------------
+    # These default to "" so the recipe is unchanged unless the caller opts
+    # in.  See training/lib/sim2real_aug.py and training/AUGMENTATION_AUDIT.md.
+    p.add_argument("--occluder-dir", default="",
+                   help="Directory of RGBA occluder PNGs (Sárándi 2018, "
+                        "ECCV PoseTrack 2018 winner).  Pre-extract with "
+                        "training/_iter_extract_voc.py.")
+    p.add_argument("--p-occluder", type=float, default=0.6,
+                   help="Probability of pasting occluders per sample.")
+    p.add_argument("--bg-corpus-dir", default="",
+                   help="Directory of person-free real-image crops for "
+                        "BEDLAM-style BG compositing.  Requires --matte-dir.")
+    p.add_argument("--matte-dir", default="",
+                   help="Per-sample person mattes ({id}.png).  Pre-compute "
+                        "with training/_iter_compute_mattes.py.")
+    p.add_argument("--p-bg-composite", type=float, default=0.5,
+                   help="Probability of replacing the synth bg per sample.")
+    p.add_argument("--fda-refs-dir", default="",
+                   help="Directory of real-image refs for Fourier Domain "
+                        "Adaptation (Yang & Soatto CVPR'20).  Refs at the "
+                        "model's input WxH (192x256) recommended.")
+    p.add_argument("--p-fda", type=float, default=0.3,
+                   help="Probability of FDA per sample.")
     return p.parse_args()
 
 
@@ -224,8 +247,14 @@ def main():
 
     input_wh = (args.input_w, args.input_h)
 
-    train_cfg = DataConfig(dataset_dir=args.dataset_dir, split="train",
-                            input_wh=input_wh, training=True)
+    train_cfg = DataConfig(
+        dataset_dir=args.dataset_dir, split="train",
+        input_wh=input_wh, training=True,
+        occluder_dir=args.occluder_dir, p_occluder=args.p_occluder,
+        bg_corpus_dir=args.bg_corpus_dir, matte_dir=args.matte_dir,
+        p_bg_composite=args.p_bg_composite,
+        fda_refs_dir=args.fda_refs_dir, p_fda=args.p_fda,
+    )
     val_cfg = DataConfig(dataset_dir=args.dataset_dir, split="val",
                           input_wh=input_wh, training=False, photometric=False)
     train_ds = SynthPoseDataset(train_cfg)

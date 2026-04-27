@@ -50,6 +50,7 @@ def build_sim2real_aug(
     p_fog_shadow: float = 0.1,
     fda_reference_images: Sequence[np.ndarray] | None = None,
     p_fda: float = 0.3,
+    occluders_active: bool = False,
 ):
     """Return an Albumentations 2.x Compose with keypoint-aware aug for pose.
 
@@ -63,12 +64,14 @@ def build_sim2real_aug(
 
     transforms = []
 
-    # FDA first (against optional real-reference corpus) to shift low-freq
-    # spectrum toward realism before photometric aug mutates it.
-    if fda_reference_images is not None and len(fda_reference_images) > 0:
-        transforms.append(
-            A.FDA(reference_images=list(fda_reference_images),
-                   beta_limit=0.1, read_fn=lambda x: x, p=p_fda))
+    # FDA is handled OUTSIDE this Compose now (see data.py _transform).
+    # Albumentations 2.x's A.FDA requires per-call metadata kwargs, which
+    # is awkward when we want a fixed reference corpus.  We instead call
+    # the standalone numpy function `albumentations.fourier_domain_adaptation`
+    # directly, with a manually-sampled reference per call.  The kwargs
+    # `fda_reference_images` and `p_fda` are kept on this signature for
+    # API compatibility but ignored here.
+    _ = fda_reference_images, p_fda  # silence unused-arg linter
 
     # Photometric / colour
     transforms.extend([
@@ -102,14 +105,20 @@ def build_sim2real_aug(
         A.ImageCompression(quality_range=(50, 90), p=0.3),       # double-JPEG
     ])
 
-    # Occlusion patches (RTMPose CoarseDropout, 2.x API)
-    transforms.append(A.CoarseDropout(
-        num_holes_range=(1, 3),
-        hole_height_range=(0.10, 0.40),     # fractions of image
-        hole_width_range=(0.10, 0.40),
-        fill=0,                             # pad with black
-        p=p_dropout,
-    ))
+    # Occlusion: prefer Sárándi-style realistic-object pasting (handled
+    # outside Albumentations in data.py via sim2real_aug.occlude_with_objects).
+    # When that's active (`occluders_active=True`) we drop CoarseDropout
+    # because realistic occluders strictly subsume rectangular-hole dropout.
+    # Fall back to RTMPose's CoarseDropout otherwise so the recipe doesn't
+    # silently regress on setups that haven't installed an occluder corpus.
+    if not occluders_active:
+        transforms.append(A.CoarseDropout(
+            num_holes_range=(1, 3),
+            hole_height_range=(0.10, 0.40),     # fractions of image
+            hole_width_range=(0.10, 0.40),
+            fill=0,                             # pad with black
+            p=p_dropout,
+        ))
 
     # Outdoor rarities
     transforms.append(A.OneOf([

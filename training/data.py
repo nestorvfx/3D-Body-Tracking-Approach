@@ -43,6 +43,10 @@ from augmentation import (   # noqa: E402
     build_sim2real_aug, horizontal_flip, jitter_bbox, half_body_bbox,
     build_visibility_masks, rotation_affine,
 )
+from sim2real_aug import (   # noqa: E402
+    load_occluders_from_dir, load_bg_corpus, load_fda_refs,
+    occlude_with_objects, composite_on_real_bg, apply_fda,
+)
 
 
 @dataclass
@@ -57,6 +61,25 @@ class DataConfig:
     rotation_deg: float = 45.0
     photometric: bool = True
     training: bool = True
+
+    # ---- Sim-to-real (F1 + F2) ---------------------------------------------
+    # Realistic-object occluder pasting (Sárándi 2018, ECCV PoseTrack winner).
+    # Path to a directory of RGBA PNG cutouts; if empty/missing, falls back
+    # to RTMPose CoarseDropout.
+    occluder_dir: str = ""
+    p_occluder: float = 0.6
+
+    # Background compositing onto real-image crops (BEDLAM-CLIFF style).
+    # Requires per-sample person mattes saved as <id>.png in matte_dir; if
+    # either is missing, this step is skipped.
+    bg_corpus_dir: str = ""
+    matte_dir: str = ""
+    p_bg_composite: float = 0.5
+
+    # Fourier Domain Adaptation (Yang & Soatto CVPR'20).  References should
+    # be a directory of real-image crops at the model's input resolution.
+    fda_refs_dir: str = ""
+    p_fda: float = 0.3
 
 
 def _load_manifest_arrays(dataset_dir: Path, split: str) -> dict | None:
@@ -131,16 +154,57 @@ class SynthPoseDataset(Dataset):
             input_size=(cfg.input_wh[0], cfg.input_wh[1], cfg.input_wh[1]))
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        self.photo = build_sim2real_aug() if (cfg.training and cfg.photometric) else None
+
+        # ---- Sim-to-real corpora (loaded ONCE, shared by all workers via
+        # the dataset-level numpy arrays which copy-on-write cheaply).  We
+        # only load when training; val keeps clean synth crops.
+        self.occluders: list[np.ndarray] = []
+        self.bg_corpus: list[np.ndarray] = []
+        self.fda_refs: list[np.ndarray] = []
+        if cfg.training and cfg.photometric:
+            if cfg.occluder_dir:
+                self.occluders = load_occluders_from_dir(cfg.occluder_dir)
+                if self.occluders:
+                    print(f"[data] loaded {len(self.occluders)} occluders "
+                          f"from {cfg.occluder_dir}")
+            if cfg.bg_corpus_dir and cfg.matte_dir:
+                self.bg_corpus = load_bg_corpus(cfg.bg_corpus_dir)
+                if self.bg_corpus:
+                    print(f"[data] loaded {len(self.bg_corpus)} bg refs "
+                          f"from {cfg.bg_corpus_dir}")
+                self._matte_dir = Path(cfg.matte_dir)
+            else:
+                self._matte_dir = None
+            if cfg.fda_refs_dir:
+                self.fda_refs = load_fda_refs(
+                    cfg.fda_refs_dir, target_wh=cfg.input_wh)
+                if self.fda_refs:
+                    print(f"[data] loaded {len(self.fda_refs)} FDA refs "
+                          f"from {cfg.fda_refs_dir}")
+        else:
+            self._matte_dir = None
+
+        self.photo = (
+            build_sim2real_aug(
+                fda_reference_images=self.fda_refs or None,
+                p_fda=cfg.p_fda,
+                occluders_active=bool(self.occluders),
+            )
+            if (cfg.training and cfg.photometric)
+            else None)
 
     def __len__(self) -> int:
         return self._n
 
     def _transform(self, img_full, kps_2d_full, kps_3d, bbox, rng, training: bool,
-                   return_stages=False):
+                   return_stages=False, sample_id: str | None = None):
         """Run the aug stack. Optionally collect per-stage intermediates
         for the aug_debug viewer.  Returns (crop, kps2d_crop, kps3d, vis01,
-        stages-or-None)."""
+        stages-or-None).
+
+        `sample_id` is the dataset record id; required if BG compositing
+        should look up the per-sample person matte.
+        """
         stages = {}
         vis = kps_2d_full[:, 2].copy()
         if return_stages:
@@ -164,6 +228,28 @@ class SynthPoseDataset(Dataset):
         if return_stages:
             stages["after_bbox"] = (crop.copy(), kps2d.copy(), vis.copy())
 
+        # --- F2b: BG compositing (real-image bg replaces synth env) ---
+        # Done BEFORE rotation/flip so the matte only needs the same
+        # TopdownAffine warp the image got — no rotation/flip-tracking
+        # complexity for the matte.  After this step the image and matte
+        # alignment is no longer needed; rotation/flip operate on the
+        # composited RGB exactly as they did before.
+        if (training and self.bg_corpus and self._matte_dir is not None
+                and sample_id is not None
+                and rng.random() < self.cfg.p_bg_composite):
+            matte_path = self._matte_dir / f"{sample_id}.png"
+            if matte_path.exists():
+                matte_full = cv2.imread(str(matte_path), cv2.IMREAD_GRAYSCALE)
+                if matte_full is not None:
+                    matte_crop = cv2.warpAffine(
+                        matte_full, M, self.cfg.input_wh,
+                        flags=cv2.INTER_LINEAR, borderValue=0)
+                    crop = composite_on_real_bg(
+                        crop, matte_crop, self.bg_corpus, rng=rng)
+                    if return_stages:
+                        stages["after_bg_composite"] = (
+                            crop.copy(), kps2d.copy(), vis.copy())
+
         # --- rotation (training only) ---
         if training and self.cfg.rotation_deg > 0:
             angle = rng.uniform(-self.cfg.rotation_deg, self.cfg.rotation_deg)
@@ -177,7 +263,33 @@ class SynthPoseDataset(Dataset):
             if return_stages:
                 stages["after_flip"] = (crop.copy(), kps2d.copy(), vis.copy())
 
-        # --- sim2real photometric / noise / occlusion ---
+        # --- F2a: Fourier Domain Adaptation (Yang & Soatto CVPR'20) ---
+        # Applied AFTER geometric (rotation/flip) but BEFORE occluders
+        # and photometric.  Reasoning: FDA shifts the low-freq spectrum
+        # of the SYNTH image toward the real-reference spectrum, which
+        # is most useful when the synth still has its synth pixel layout
+        # (after BG composite + rotation/flip).  Subsequent occluder paste
+        # and photometric ops then act on the spectrally-shifted image.
+        if (training and self.fda_refs
+                and rng.random() < self.cfg.p_fda):
+            crop = apply_fda(crop, self.fda_refs, rng=rng)
+            if return_stages:
+                stages["after_fda"] = (crop.copy(), kps2d.copy(), vis.copy())
+
+        # --- F1: realistic-object occluder pasting (Sárándi 2018) ---
+        # Applied BEFORE photometric so occluders pick up the same color
+        # jitter / blur / JPEG as the rest of the image — they look like
+        # real objects in the scene rather than pasted-on stickers.
+        if training and self.occluders and rng.random() < self.cfg.p_occluder:
+            crop = occlude_with_objects(crop, self.occluders, rng=rng)
+            if return_stages:
+                stages["after_occluder"] = (crop.copy(), kps2d.copy(),
+                                             vis.copy())
+
+        # --- sim2real photometric / noise / dropout-or-occlusion ---
+        # FDA (if refs are configured) is the FIRST step inside this Compose
+        # — it shifts the low-freq spectrum toward real before downstream
+        # color/blur/JPEG augs perturb it further.
         if training and self.photo is not None:
             out = self.photo(image=crop, keypoints=kps2d.tolist())
             crop = out["image"]
@@ -204,8 +316,10 @@ class SynthPoseDataset(Dataset):
         kps_3d      = self.arrs["kps3d"][idx].copy()    # [17, 3]
         bbox        = tuple(self.arrs["bbox"][idx].tolist())
 
+        sample_id = self.arrs["id"][idx].decode("utf-8")
         crop, kps2d, kps3d, vis01, use_bbox, _ = self._transform(
-            img, kps_2d_full, kps_3d, bbox, rng, self.cfg.training)
+            img, kps_2d_full, kps_3d, bbox, rng, self.cfg.training,
+            sample_id=sample_id)
 
         # SimCC-3D target encoding.
         targets = simcc3d_encode(kps2d, kps3d, vis01, self.simcc)

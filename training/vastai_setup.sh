@@ -73,4 +73,34 @@ python3 -m pip install --user --quiet \
     h5py \
     numpy
 
+# ---------------------------------------------------------------------------
+# 5. Sim-to-real augmentation corpora (Open Images V7).
+#    F1 occluder cutouts (Sárándi 2018-style) + person-free bg crops.
+#    Open Images V7 is fully commercial-clean: images CC BY 2.0, annotations
+#    Apache-2.0.  Attribution string emitted to assets/sim2real_refs/
+#    ATTRIBUTION.txt — preserve in shipped product.
+# ---------------------------------------------------------------------------
+log "Open Images V7 sim-to-real corpora"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "${HERE}/_iter_setup_openimages.sh"
+python3 "${HERE}/_iter_extract_openimages.py" \
+    --max-occluders 8000 \
+    --max-bg 5000 \
+    --n-workers 24 \
+    --skip-existing-occluders
+
+# ---------------------------------------------------------------------------
+# 6. Person mattes for the synth dataset (BEDLAM-CLIFF-style BG composite).
+#    Requires the synth dataset to already be at dataset/output/<run>/ and
+#    assets/pose_landmarker_heavy.task to exist (Apache-2.0 from MediaPipe).
+#    Idempotent — skips images whose matte already exists.
+# ---------------------------------------------------------------------------
+if [ -f "${HERE}/../assets/pose_landmarker_heavy.task" ] && \
+   [ -f "${HERE}/../dataset/output/synth_iter/labels.jsonl" ]; then
+    log "computing synth person mattes"
+    python3 "${HERE}/_iter_compute_mattes.py" --mattes-only
+else
+    log "skipping mattes (synth dataset or pose model missing — run _iter_compute_mattes.py manually after dataset is in place)"
+fi
+
 log "DONE — run ./vastai_train.sh"

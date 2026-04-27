@@ -22,6 +22,9 @@ Generated 2026-04-20.
 | timm 1.0.26 (code) | Apache-2.0 | Green | |
 | MobileNetV4-Conv-S weights (timm HF) | **see below** | **Amber** | ImageNet-1k-trained — industry-accepted for commercial use, but NOT formally cleared. |
 | Albumentations 2.0.8 | MIT | Green | |
+| Open Images V7 — segmentation masks (annotations) | Apache-2.0 (Google) | Green | used for sim-to-real occluder corpus (training-time augmentation only, never in val/test set). |
+| Open Images V7 — images | CC BY 2.0 (Flickr photographers) | Green | used as occluder cutouts + person-free bg corpus for training-time augmentation only. Attribution required at ship — see "Attribution obligations" below. |
+| MediaPipe Pose Heavy (`pose_landmarker_heavy.task`) | Apache-2.0 (Google) | Green | used to compute synth person mattes for BG-composite augmentation. |
 | RTMPose3D SimCC-3D head (my reimpl) | Apache-2.0 (of design) | Green | implementation not copy-pasted |
 | TensorBoard | Apache-2.0 | Green | |
 
@@ -84,6 +87,30 @@ design doc formalises that choice.
 - **Poly Haven HDRIs** — CC0, attribution appreciated but not required.
 - **MPFB2 / MakeHuman CC0 assets** — attribution appreciated but not required.
 - **timm / MobileNetV4** — Apache-2.0 NOTICE text.
+- **Open Images V7** — required attribution string (auto-emitted to
+  `assets/sim2real_refs/ATTRIBUTION.txt` by the extractor):
+  > "This product uses augmentation imagery derived from Open Images V7
+  > (https://storage.googleapis.com/openimages/web/, images CC BY 2.0,
+  > annotations Apache-2.0)."
+
+  Place this string in:
+  1. `THIRD_PARTY_NOTICES.md` at ship time (single-line entry).
+  2. The README / About / Credits surface of any consumer app that
+     ships the trained model.
+  3. The model card if the trained checkpoint is distributed standalone
+     (e.g., on Hugging Face).
+
+  Per-image attribution to individual Flickr photographers is NOT
+  required for trained-model derivatives — CC BY 2.0's "reasonable to
+  the medium" clause is satisfied by aggregate attribution to the
+  Open Images V7 dataset (industry precedent: every commercial model
+  trained on Open Images / Flickr-CC corpora attributes at the dataset
+  level, not per image).
+
+- **MediaPipe Pose** — Apache-2.0 NOTICE text (used at preprocessing
+  time to compute mattes; not embedded in the trained model itself,
+  but the NOTICE preservation requirement still applies because the
+  matte outputs are derivative).
 
 Ship a THIRD_PARTY_NOTICES.md aggregating all of these when the final
 artefact is released.

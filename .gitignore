@@ -79,6 +79,24 @@ desktop.ini
 *.blend@
 
 # ---------------------------------------------------------------------------
+# Sim-to-real augmentation corpora — pre-extracted occluders, FDA refs,
+# bg crops, and per-sample mattes.  Source: Open Images V7 (commercial-
+# clean: images CC BY 2.0, annotations Apache-2.0).  Reproducible on the
+# target machine via training/_iter_setup_openimages.sh +
+# training/_iter_extract_openimages.py + training/_iter_compute_mattes.py.
+# Total local footprint: ~3-5 GB (images cached to assets/openimages_raw/
+# images_validation/ + extracted cutouts + bg crops).
+# ---------------------------------------------------------------------------
+assets/sim2real_refs/
+assets/openimages_raw/
+
+# ---------------------------------------------------------------------------
+# Local capture footage — large, project-specific, not training data.
+# (Small MediaPipe .task models stay tracked; bench scripts depend on them.)
+# ---------------------------------------------------------------------------
+assets/*.mp4
+
+# ---------------------------------------------------------------------------
 # Generic binary bulk — rebuildable, not source.
 # ---------------------------------------------------------------------------
 *.zip
